@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Yahoo Fantasy Draft Round Column",
+  "version": "1.0",
+  "description": "Adds draft round data to Yahoo Fantasy Baseball (and Football) roster pages.",
+  "permissions": ["storage", "scripting", "tabs"],
+  "host_permissions": [
+    "https://baseball.fantasysports.yahoo.com/*",
+    "https://football.fantasysports.yahoo.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://baseball.fantasysports.yahoo.com/b1/*/*",
+        "https://football.fantasysports.yahoo.com/f1/*/*"
+      ],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Draft Round Helper",
+    "default_popup": "popup.html"
+  }
+}

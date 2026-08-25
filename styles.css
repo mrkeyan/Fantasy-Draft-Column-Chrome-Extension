@@ -1,0 +1,14 @@
+th.draft-round-col,
+td.draft-round-col {
+  text-align: right;          /* Ta-end */
+  font-size: 12px;            /* Fz-xs */
+  color: #555;
+  white-space: nowrap;        /* Nowrap */
+  padding: 4px 6px;
+  border-right: 1px solid #ddd; /* approximate Bdrend */
+}
+
+th.draft-round-col.header {
+  font-weight: 600;           /* Fw-b */
+  color: #333;
+}
