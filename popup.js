@@ -156,11 +156,13 @@ function getSportAndLeagueId(url) {
 // This function runs IN the page context (not the extension context)
 function scrapeDraftDataInPage() {
   const map = {};
-  const tables = document.querySelectorAll('#drafttables table.Table-interactive');
+  const tables = document.querySelectorAll(
+    '#drafttables table.Table-interactive'
+  );
 
   tables.forEach((table) => {
-    const headerTh = table.querySelector('thead th.Fw-b');
-    const roundMatch = headerTh?.textContent.match(/Round\s*(\d+)/i);
+    const header = table.querySelector('thead th');
+    const roundMatch = header?.textContent.match(/Round\s*(\d+)/i);
 
     if (!roundMatch) {
       return;
@@ -169,7 +171,7 @@ function scrapeDraftDataInPage() {
     const round = Number.parseInt(roundMatch[1], 10);
 
     table.querySelectorAll('tbody tr').forEach((row) => {
-      // Works for normal players, kickers, and team defenses.
+      // Regular players, kickers, and any Yahoo row containing the stable ID.
       const playerElement = row.querySelector('[data-ys-playerid]');
 
       if (playerElement) {
@@ -177,25 +179,33 @@ function scrapeDraftDataInPage() {
 
         if (playerId) {
           map[playerId] = round;
+          return;
         }
-
-        return;
       }
 
-      // Fallback for Yahoo layouts that have no data-ys-playerid.
       const playerLink = row.querySelector(
-        'a[href*="/mlb/players/"], ' +
-        'a[href*="/nfl/players/"]'
+        'td.player a[href*="sports.yahoo.com"]'
       );
 
       if (!playerLink) {
         return;
       }
 
-      const idMatch = playerLink.href.match(/\/players\/(\d+)/);
+      // Individual player URL:
+      // https://sports.yahoo.com/nfl/players/12345
+      const playerMatch = playerLink.href.match(/\/players\/(\d+)/);
 
-      if (idMatch) {
-        map[idMatch[1]] = round;
+      if (playerMatch) {
+        map[playerMatch[1]] = round;
+        return;
+      }
+
+      // D/ST team URL:
+      // https://sports.yahoo.com/nfl/teams/la-rams/
+      const teamMatch = playerLink.href.match(/\/nfl\/teams\/([^/?#]+)/);
+
+      if (teamMatch) {
+        map[`team:${teamMatch[1].toLowerCase()}`] = round;
       }
     });
   });

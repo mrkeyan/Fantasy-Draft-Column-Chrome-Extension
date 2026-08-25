@@ -79,17 +79,7 @@ function findSalaryColumn(table) {
 
 function findSalaryCell(row, salaryColumn) {
   const cells = Array.from(row.querySelectorAll(':scope > td'));
-
-  // Preferred: Salary is normally the numeric cell after the fantasy/roster
-  // columns and immediately before the first statistics cell.
-  //
-  // Yahoo marks Salary with Bdrend, but several cells can have Bdrend.
-  // Fall back to the calculated visual index.
-  if (cells[salaryColumn]) {
-    return cells[salaryColumn];
-  }
-
-  return null;
+  return cells[salaryColumn] || null;
 }
 
 function isPlayerRow(row) {
@@ -97,7 +87,8 @@ function isPlayerRow(row) {
     row.querySelector(
       '[data-ys-playerid], ' +
       'a[href*="/mlb/players/"], ' +
-      'a[href*="/nfl/players/"]'
+      'a[href*="/nfl/players/"], ' +
+      'a[href*="/nfl/teams/"]'
     )
   );
 }
@@ -107,15 +98,12 @@ function getPlayerRows(table) {
 }
 
 function getRosterTables() {
-  // Normal Baseball and Football roster pages:
-  // statTable0, statTable1, statTable2, etc.
+  // Team/roster pages: statTable0, statTable1, statTable2, etc.
   const statTables = Array.from(
     document.querySelectorAll('table[id*="statTable"]')
   );
 
-  // Football Set Keeper pages:
-  // Table IDs are dynamic YUI IDs, so select only interactive tables
-  // inside the keeper form that have a Salary header.
+  // Football Set Keeper pages: dynamic Yahoo/YUI table IDs.
   const keeperTables = Array.from(
     document.querySelectorAll(
       '#choose-keepers-form table.Table-interactive'
@@ -126,36 +114,49 @@ function getRosterTables() {
 }
 
 function extractPlayerId(row) {
-  // Yahoo uses this attribute on player links on common roster layouts.
   const playerElement = row.querySelector('[data-ys-playerid]');
 
-  if (playerElement) {
-    const playerId = playerElement.getAttribute('data-ys-playerid');
+  // Normal roster pages normally expose a stable Yahoo Fantasy ID.
+  let playerId = playerElement?.getAttribute('data-ys-playerid') || null;
 
-    if (playerId) {
-      return playerId;
+  const playerLink = row.querySelector(
+    'a[href*="/mlb/players/"], ' +
+    'a[href*="/nfl/players/"], ' +
+    'a[href*="/nfl/teams/"]'
+  );
+
+  // Fallback for normal player links where data-ys-playerid is absent.
+  if (!playerId && playerLink) {
+    const playerMatch = playerLink.href.match(/\/players\/(\d+)/);
+
+    if (playerMatch) {
+      playerId = playerMatch[1];
     }
   }
 
-  // Fallback for the public player profile links in MLB and NFL.
-  const playerLink = row.querySelector(
-    'a[href*="/mlb/players/"], ' +
-    'a[href*="/nfl/players/"]'
-  );
+  // Team D/ST does not have a /players/{id} draft-results URL.
+  // The stable shared identifier across draft and roster pages is its team slug.
+  const teamMatch = playerLink?.href.match(/\/nfl\/teams\/([^/?#]+)/);
 
-  if (!playerLink) {
-    return null;
-  }
+  const teamKey = teamMatch
+    ? `team:${teamMatch[1].toLowerCase()}`
+    : null;
 
-  const match = playerLink.href.match(/\/players\/(\d+)/);
-  return match ? match[1] : null;
+  return {
+    playerId,
+    teamKey
+  };
 }
 
 function setSalaryCellToDraftRound(cell, round) {
   const target = cell.querySelector('div') || cell;
-  const text = round === undefined ? '—' : String(round);
+    const text =
+    round === null || round === undefined
+      ? '—'
+      : String(round);
 
   target.textContent = text;
+
   cell.title =
     round === undefined
       ? 'Draft round unavailable'
@@ -181,8 +182,16 @@ async function fillSalaryWithDraftRound() {
   console.log(
     '[DRAFT ROUND] Loaded',
     savedPlayerCount,
-    'players from',
+    'draft mappings from',
     storageKey
+  );
+
+  console.log(
+    '[DRAFT ROUND] D/ST debug:',
+    'numeric Rams ID (100014):',
+    roundMap['100014'],
+    '| Rams team key:',
+    roundMap['team:la-rams']
   );
 
   if (savedPlayerCount === 0) {
@@ -223,11 +232,18 @@ async function fillSalaryWithDraftRound() {
     );
 
     for (const row of playerRows) {
-      const playerId = extractPlayerId(row);
+      const playerRef = extractPlayerId(row);
 
-      if (!playerId) {
+      if (!playerRef || (!playerRef.playerId && !playerRef.teamKey)) {
         continue;
       }
+
+      const { playerId, teamKey } = playerRef;
+
+      // Prefer a numeric Yahoo player ID. For D/ST, fall back to team:slug.
+      const draftRound =
+        (playerId && roundMap[playerId]) ??
+        (teamKey && roundMap[teamKey]);
 
       const salaryCell = findSalaryCell(row, salaryColumn);
 
@@ -235,17 +251,17 @@ async function fillSalaryWithDraftRound() {
         console.warn(
           '[DRAFT ROUND] Salary cell missing:',
           tableId,
-          '| Player ID:',
-          playerId,
-          '| Expected index:',
+          '| Player:',
+          playerId || teamKey,
+          '| Expected cell index:',
           salaryColumn,
           '| Actual cell count:',
-          cells.length
+          row.querySelectorAll(':scope > td').length
         );
         continue;
       }
 
-      setSalaryCellToDraftRound(salaryCell, roundMap[playerId]);
+      setSalaryCellToDraftRound(salaryCell, draftRound);
     }
   }
 
@@ -254,28 +270,20 @@ async function fillSalaryWithDraftRound() {
 
 function waitForYahooTables(timeoutMs = 10000) {
   return new Promise((resolve) => {
-    const startedAt = Date.now();
-    let completed = false;
+    let finished = false;
 
     const finish = () => {
-      if (completed) {
+      if (finished) {
         return;
       }
 
-      completed = true;
+      finished = true;
       observer.disconnect();
       resolve();
     };
 
     const check = () => {
-      const tables = getRosterTables();
-
-      if (tables.length > 0) {
-        finish();
-        return;
-      }
-
-      if (Date.now() - startedAt >= timeoutMs) {
+      if (getRosterTables().length > 0) {
         finish();
       }
     };
@@ -288,7 +296,6 @@ function waitForYahooTables(timeoutMs = 10000) {
     });
 
     check();
-
     setTimeout(finish, timeoutMs);
   });
 }
@@ -298,6 +305,9 @@ function waitForYahooTables(timeoutMs = 10000) {
     await waitForYahooTables();
     await fillSalaryWithDraftRound();
   } catch (error) {
-    console.error('[DRAFT ROUND] Failed to update Salary column:', error);
+    console.error(
+      '[DRAFT ROUND] Failed to update Salary column:',
+      error
+    );
   }
 })();
