@@ -160,24 +160,43 @@ function scrapeDraftDataInPage() {
 
   tables.forEach((table) => {
     const headerTh = table.querySelector('thead th.Fw-b');
-    if (!headerTh) return;
+    const roundMatch = headerTh?.textContent.match(/Round\s*(\d+)/i);
 
-    const headerText = headerTh.textContent.trim();
-    const roundMatch = headerText.match(/Round\s*(\d+)/i);
-    if (!roundMatch) return;
-    const round = parseInt(roundMatch[1], 10);
+    if (!roundMatch) {
+      return;
+    }
 
-    const rows = table.querySelectorAll('tbody tr');
-    rows.forEach((row) => {
-      // Support both MLB and NFL player URLs
-      const link = row.querySelector('td.player a[href*="/mlb/players/"], td.player a[href*="/nfl/players/"]');
-      if (!link) return;
+    const round = Number.parseInt(roundMatch[1], 10);
 
-      const m = link.href.match(/\/players\/(\d+)/);
-      if (!m) return;
+    table.querySelectorAll('tbody tr').forEach((row) => {
+      // Works for normal players, kickers, and team defenses.
+      const playerElement = row.querySelector('[data-ys-playerid]');
 
-      const playerId = m[1];
-      map[playerId] = round;
+      if (playerElement) {
+        const playerId = playerElement.getAttribute('data-ys-playerid');
+
+        if (playerId) {
+          map[playerId] = round;
+        }
+
+        return;
+      }
+
+      // Fallback for Yahoo layouts that have no data-ys-playerid.
+      const playerLink = row.querySelector(
+        'a[href*="/mlb/players/"], ' +
+        'a[href*="/nfl/players/"]'
+      );
+
+      if (!playerLink) {
+        return;
+      }
+
+      const idMatch = playerLink.href.match(/\/players\/(\d+)/);
+
+      if (idMatch) {
+        map[idMatch[1]] = round;
+      }
     });
   });
 
