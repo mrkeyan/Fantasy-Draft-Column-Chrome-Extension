@@ -1,56 +1,122 @@
-// popup.js – smart popup: scraper on draft pages, manual JSON otherwise (per-league)
+// popup.js
+// Scrapes Yahoo Fantasy Draft Results and saves draft-round mappings
+// per sport and league ID.
 
 function getSportAndLeagueId(url) {
-  let sport = null;
-  let leagueId = null;
+  const baseballMatch = url.match(
+    /baseball\.fantasysports\.yahoo\.com\/b1\/(\d+)/
+  );
 
-  const baseballMatch = url.match(/baseball\.fantasysports\.yahoo\.com\/b1\/(\d+)/);
-  const footballMatch = url.match(/football\.fantasysports\.yahoo\.com\/f1\/(\d+)/);
+  const footballMatch = url.match(
+    /football\.fantasysports\.yahoo\.com\/f1\/(\d+)/
+  );
 
   if (baseballMatch) {
-    sport = 'mlb';
-    leagueId = baseballMatch[1];
-  } else if (footballMatch) {
-    sport = 'nfl';
-    leagueId = footballMatch[1];
+    return {
+      sport: 'mlb',
+      leagueId: baseballMatch[1]
+    };
   }
 
-  return { sport, leagueId };
+  if (footballMatch) {
+    return {
+      sport: 'nfl',
+      leagueId: footballMatch[1]
+    };
+  }
+
+  return {
+    sport: null,
+    leagueId: null
+  };
+}
+
+function getStorageKey(sport, leagueId) {
+  if (!sport || !leagueId) {
+    return null;
+  }
+
+  return `draftRounds_${sport}_${leagueId}`;
+}
+
+function getSportLabel(sport) {
+  if (sport === 'mlb') {
+    return 'Baseball';
+  }
+
+  if (sport === 'nfl') {
+    return 'Football';
+  }
+
+  return 'Yahoo Fantasy';
+}
+
+async function getActiveTab() {
+  const [tab] = await chrome.tabs.query({
+    active: true,
+    currentWindow: true
+  });
+
+  return tab || null;
+}
+
+async function getStoredMappingCount(storageKey) {
+  if (!storageKey) {
+    return 0;
+  }
+
+  const stored = await chrome.storage.local.get(storageKey);
+  const roundMap = stored[storageKey] || {};
+
+  return Object.keys(roundMap).length;
 }
 
 (async function initPopup() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = await getActiveTab();
   const url = tab?.url || '';
 
   const { sport, leagueId } = getSportAndLeagueId(url);
-  const storageKey = sport && leagueId
-    ? `draftRounds_${sport}_${leagueId}`
-    : null;
+  const storageKey = getStorageKey(sport, leagueId);
 
-  const isDraftPage = url.includes('/draftresults') || url.includes('#drafttables');
-  const isBaseball = url.includes('baseball.fantasysports.yahoo.com');
-  const isFootball = url.includes('football.fantasysports.yahoo.com');
+  const isDraftPage = /\/draftresults(?:[/?#]|$)/i.test(url);
+  const sportLabel = getSportLabel(sport);
 
   const scraperSection = document.getElementById('scraperSection');
   const manualSection = document.getElementById('manualSection');
   const title = document.getElementById('title');
   const statsLine = document.getElementById('statsLine');
 
-  // Show/hide sections based on page type
-  if (isDraftPage && storageKey) {
-    title.textContent =
-      isBaseball
-        ? `Baseball Draft Round Scraper (League ${leagueId})`
-        : isFootball
-          ? `Football Draft Round Scraper (League ${leagueId})`
-          : `Draft Round Scraper (League ${leagueId})`;
+  async function updateStats() {
+    if (!statsLine) {
+      return;
+    }
+
+    if (!storageKey) {
+      statsLine.textContent =
+        'Stored: unavailable (open a supported Yahoo league page).';
+      return;
+    }
+
+    const count = await getStoredMappingCount(storageKey);
+
+    statsLine.textContent =
+      count === 0
+        ? `Stored: 0 mappings for League ${leagueId}.`
+        : `Stored: ${count} mappings for League ${leagueId}.`;
+  }
+
+  if (isDraftPage && storageKey && tab?.id) {
+    title.textContent = `${sportLabel} Draft Round Scraper (League ${leagueId})`;
 
     scraperSection.style.display = 'block';
     manualSection.style.display = 'none';
 
-    document.getElementById('scrapeBtn').addEventListener('click', async () => {
-      const status = document.getElementById('scrapeStatus');
-      status.textContent = '';
+    const scrapeButton = document.getElementById('scrapeBtn');
+    const scrapeStatus = document.getElementById('scrapeStatus');
+
+    scrapeButton.addEventListener('click', async () => {
+      scrapeButton.disabled = true;
+      scrapeStatus.textContent = 'Scraping Yahoo Draft Results…';
 
       try {
         const results = await chrome.scripting.executeScript({
@@ -58,157 +124,270 @@ function getSportAndLeagueId(url) {
           func: scrapeDraftDataInPage
         });
 
-        const draftMap = results[0]?.result;
+        const scrapeResult = results[0]?.result || {};
+        const draftMap = scrapeResult.map || {};
+        const diagnostics = scrapeResult.diagnostics || {};
+        const savedCount = Object.keys(draftMap).length;
 
-        if (!draftMap || typeof draftMap !== 'object' || Object.keys(draftMap).length === 0) {
-          status.textContent = 'No draft data found. Make sure you’re on the draft results page with #drafttables.';
+        if (savedCount === 0) {
+          scrapeStatus.textContent =
+            `No draft data found. ` +
+            `Tables: ${diagnostics.tablesFound || 0}; ` +
+            `rounds: ${diagnostics.roundsFound || 0}; ` +
+            `rows: ${diagnostics.rowsFound || 0}.`;
+
+          console.warn(
+            '[DRAFT ROUND] No mappings found during draft scrape:',
+            diagnostics
+          );
+
           return;
         }
 
-        await chrome.storage.local.set({ [storageKey]: draftMap });
-        status.textContent = 'Saved ' + Object.keys(draftMap).length + ' players (' + storageKey + ').';
-        updateStats(); // refresh count
-      } catch (err) {
-        console.error(err);
-        status.textContent = 'Error scraping: ' + err.message;
+        await chrome.storage.local.set({
+          [storageKey]: draftMap
+        });
+
+        scrapeStatus.textContent =
+          `Saved ${savedCount} mappings: ` +
+          `${diagnostics.playerMappings || 0} players, ` +
+          `${diagnostics.defenseMappings || 0} D/ST.`;
+
+        console.log(
+          '[DRAFT ROUND] Saved draft data:',
+          {
+            storageKey,
+            savedCount,
+            diagnostics
+          }
+        );
+
+        await updateStats();
+      } catch (error) {
+        console.error('[DRAFT ROUND] Scrape error:', error);
+
+        scrapeStatus.textContent =
+          `Error scraping draft data: ${error.message}`;
+      } finally {
+        scrapeButton.disabled = false;
       }
     });
   } else {
-    title.textContent =
-      isBaseball
-        ? `Baseball Draft Round Helper (League ${leagueId || '?'})`
-        : isFootball
-          ? `Football Draft Round Helper (League ${leagueId || '?'})`
-          : 'Draft Round Helper';
+    title.textContent = storageKey
+      ? `${sportLabel} Draft Round Helper (League ${leagueId})`
+      : 'Draft Round Helper';
 
     scraperSection.style.display = 'none';
     manualSection.style.display = 'block';
 
-    document.getElementById('saveBtn').addEventListener('click', async () => {
-      const raw = document.getElementById('jsonInput').value.trim();
-      const status = document.getElementById('status');
+    const saveButton = document.getElementById('saveBtn');
+    const jsonInput = document.getElementById('jsonInput');
+    const status = document.getElementById('status');
+    const deleteButton = document.getElementById('deleteBtn');
+    const deleteStatus = document.getElementById('deleteStatus');
+
+    saveButton.addEventListener('click', async () => {
       status.textContent = '';
 
+      if (!storageKey) {
+        status.textContent =
+          'Open a supported Yahoo Baseball or Football league page first.';
+        return;
+      }
+
+      const raw = jsonInput.value.trim();
+
       if (!raw) {
-        status.textContent = 'Please paste JSON first.';
+        status.textContent = 'Paste draft-round JSON first.';
         return;
       }
 
       let data;
+
       try {
         data = JSON.parse(raw);
-      } catch (e) {
-        status.textContent = 'Invalid JSON: ' + e.message;
+      } catch (error) {
+        status.textContent = `Invalid JSON: ${error.message}`;
         return;
       }
 
-      if (typeof data !== 'object' || data === null || Array.isArray(data)) {
-        status.textContent = 'JSON must be an object like {"12345": 3, "67890": 7}';
+      if (
+        typeof data !== 'object' ||
+        data === null ||
+        Array.isArray(data)
+      ) {
+        status.textContent =
+          'JSON must be an object, for example: {\"12345\": 3}.';
         return;
       }
 
-      // Normalize keys to strings, values to numbers
       const normalized = {};
-      for (const [k, v] of Object.entries(data)) {
-        const num = Number(v);
-        if (!Number.isFinite(num)) continue;
-        normalized[String(k)] = Math.round(num);
+
+      for (const [key, value] of Object.entries(data)) {
+        const round = Number(value);
+
+        if (Number.isFinite(round)) {
+          normalized[String(key)] = Math.round(round);
+        }
       }
 
-      const keyToUse = storageKey || 'draftRounds_mlb_unknown';
-      await chrome.storage.local.set({ [keyToUse]: normalized });
-      status.textContent = 'Saved ' + Object.keys(normalized).length + ' players (' + keyToUse + ').';
-      updateStats(); // refresh count
+      await chrome.storage.local.set({
+        [storageKey]: normalized
+      });
+
+      status.textContent =
+        `Saved ${Object.keys(normalized).length} mappings.`;
+
+      await updateStats();
     });
 
-    // Delete button
-    document.getElementById('deleteBtn').addEventListener('click', async () => {
-      const deleteStatus = document.getElementById('deleteStatus');
+    deleteButton.addEventListener('click', async () => {
       deleteStatus.textContent = '';
 
-      const keyToUse = storageKey || 'draftRounds_mlb_unknown';
+      if (!storageKey) {
+        deleteStatus.textContent =
+          'Open a supported Yahoo Baseball or Football league page first.';
+        return;
+      }
 
-      const ok = confirm('This will remove all stored draft round data for this league (' + keyToUse + '). The Salary column will no longer show draft rounds until you scrape or import again. Continue?');
-      if (!ok) return;
+      const confirmed = confirm(
+        `Delete all saved draft-round data for ${sportLabel} ` +
+        `League ${leagueId}?`
+      );
 
-      await chrome.storage.local.remove([keyToUse]);
-      deleteStatus.textContent = 'Draft data deleted (' + keyToUse + ').';
-      updateStats(); // refresh count
+      if (!confirmed) {
+        return;
+      }
+
+      await chrome.storage.local.remove(storageKey);
+
+      deleteStatus.textContent =
+        `Deleted saved data for League ${leagueId}.`;
+
+      await updateStats();
     });
   }
 
-  // Show current stored count for this league
-  async function updateStats() {
-    const keyToUse = storageKey || 'draftRounds_mlb_unknown';
-    const stored = await chrome.storage.local.get([keyToUse]);
-    const roundMap = stored[keyToUse] || {};
-    const count = Object.keys(roundMap).length;
-    if (count === 0) {
-      statsLine.textContent = 'Stored: 0 players (no draft data for this league).';
-    } else {
-      statsLine.textContent = 'Stored: ' + count + ' players (' + keyToUse + ').';
-    }
-  }
-
-  updateStats();
+  await updateStats();
 })();
 
-// This function runs IN the page context (not the extension context)
+// This function is injected into the active Yahoo Draft Results page.
 function scrapeDraftDataInPage() {
   const map = {};
-  const tables = document.querySelectorAll(
-    '#drafttables table.Table-interactive'
+
+  const diagnostics = {
+    tablesFound: 0,
+    roundsFound: 0,
+    rowsFound: 0,
+    playerMappings: 0,
+    defenseMappings: 0,
+    duplicateMappings: 0,
+    unmatchedRows: []
+  };
+
+  // Yahoo Baseball and Football currently place all round tables in
+  // #drafttables. Do not rely on cosmetic table classes.
+  const tables = Array.from(
+    document.querySelectorAll('#drafttables table')
   );
 
-  tables.forEach((table) => {
-    const header = table.querySelector('thead th');
-    const roundMatch = header?.textContent.match(/Round\s*(\d+)/i);
+  diagnostics.tablesFound = tables.length;
+
+  for (const table of tables) {
+    const headerCells = Array.from(
+      table.querySelectorAll('thead th')
+    );
+
+    const roundHeader = headerCells.find((headerCell) =>
+      /round\s*\d+/i.test(headerCell.textContent)
+    );
+
+    const roundMatch = roundHeader?.textContent.match(
+      /round\s*(\d+)/i
+    );
 
     if (!roundMatch) {
-      return;
+      continue;
     }
 
     const round = Number.parseInt(roundMatch[1], 10);
 
-    table.querySelectorAll('tbody tr').forEach((row) => {
-      // Regular players, kickers, and any Yahoo row containing the stable ID.
-      const playerElement = row.querySelector('[data-ys-playerid]');
+    if (!Number.isFinite(round)) {
+      continue;
+    }
 
-      if (playerElement) {
-        const playerId = playerElement.getAttribute('data-ys-playerid');
+    diagnostics.roundsFound++;
 
-        if (playerId) {
-          map[playerId] = round;
-          return;
-        }
+    const rows = Array.from(
+      table.querySelectorAll('tbody tr')
+    );
+
+    diagnostics.rowsFound += rows.length;
+
+    for (const row of rows) {
+      const link = row.querySelector('td.player a, a');
+
+      if (!link) {
+        diagnostics.unmatchedRows.push({
+          round,
+          reason: 'No player/team link found'
+        });
+        continue;
       }
 
-      const playerLink = row.querySelector(
-        'td.player a[href*="sports.yahoo.com"]'
+      const href = link.href || '';
+      const name = link.textContent.trim();
+
+      // Standard Baseball and Football players, including kickers:
+      // https://sports.yahoo.com/mlb/players/11771
+      // https://sports.yahoo.com/nfl/players/40041
+      const playerMatch = href.match(
+        /\/(?:mlb|nfl)\/players\/(\d+)/i
       );
 
-      if (!playerLink) {
-        return;
-      }
-
-      // Individual player URL:
-      // https://sports.yahoo.com/nfl/players/12345
-      const playerMatch = playerLink.href.match(/\/players\/(\d+)/);
-
       if (playerMatch) {
-        map[playerMatch[1]] = round;
-        return;
+        const playerId = playerMatch[1];
+
+        if (Object.hasOwn(map, playerId)) {
+          diagnostics.duplicateMappings++;
+        }
+
+        map[playerId] = round;
+        diagnostics.playerMappings++;
+        continue;
       }
 
-      // D/ST team URL:
+      // Football D/ST:
       // https://sports.yahoo.com/nfl/teams/la-rams/
-      const teamMatch = playerLink.href.match(/\/nfl\/teams\/([^/?#]+)/);
+      // https://sports.yahoo.com/nfl/teams/denver/
+      const defenseMatch = href.match(
+        /\/nfl\/teams\/([^/?#]+)/i
+      );
 
-      if (teamMatch) {
-        map[`team:${teamMatch[1].toLowerCase()}`] = round;
+      if (defenseMatch) {
+        const teamKey =
+          `team:${defenseMatch[1].toLowerCase()}`;
+
+        if (Object.hasOwn(map, teamKey)) {
+          diagnostics.duplicateMappings++;
+        }
+
+        map[teamKey] = round;
+        diagnostics.defenseMappings++;
+        continue;
       }
-    });
-  });
 
-  return map;
+      diagnostics.unmatchedRows.push({
+        round,
+        name,
+        href,
+        reason: 'Unsupported Yahoo player/team URL'
+      });
+    }
+  }
+
+  return {
+    map,
+    diagnostics
+  };
 }
